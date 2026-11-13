@@ -4,6 +4,7 @@ from shop import cart
 
 MUG = {"name": "mug", "price_cents": 1200, "qty": 1}
 POSTER = {"name": "poster", "price_cents": 2000, "qty": 2}
+GIFT_CARD = {"name": "gift card", "price_cents": 2500, "qty": 1, "digital": True}
 
 
 class CartTest(unittest.TestCase):
@@ -16,6 +17,9 @@ class CartTest(unittest.TestCase):
     def test_shipping_per_box(self):
         self.assertEqual(cart.shipping([MUG]), 800)
         self.assertEqual(cart.shipping_per_box([MUG]), 800)
+
+    def test_digital_items_get_no_box(self):
+        self.assertEqual(cart.boxes([MUG, GIFT_CARD]), 1)
 
 
 if __name__ == "__main__":

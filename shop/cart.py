@@ -9,8 +9,11 @@ def subtotal(items):
 
 
 def boxes(items):
-    """How many boxes the warehouse packs: one per line."""
-    return len(items)
+    """How many boxes the warehouse packs: one per physical line.
+
+    Digital items (gift cards, downloads) ship by email, so they get no box.
+    """
+    return sum(1 for i in items if not i.get("digital"))
 
 
 def shipping(items):
