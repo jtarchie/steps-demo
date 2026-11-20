@@ -21,6 +21,13 @@ class CartTest(unittest.TestCase):
     def test_digital_items_get_no_box(self):
         self.assertEqual(cart.boxes([MUG, GIFT_CARD]), 1)
 
+    def test_bulk_discount(self):
+        stickers = {"name": "sticker", "price_cents": 100, "qty": 25}
+        self.assertEqual(cart.discount([stickers]), 250)
+
+    def test_no_discount_on_small_orders(self):
+        self.assertEqual(cart.discount([MUG]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
