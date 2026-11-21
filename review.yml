@@ -136,7 +136,10 @@ jobs:
               errors = re.search(r"errors=(\d+)", out)
               if failures and not errors:
                   proven.append(f)
+                  # The assertion that failed is the proof; print it beside the claim.
+                  why = [l for l in out.splitlines() if l.startswith("AssertionError")][-1:] or ["(assertion failed)"]
                   print(f"PROVEN   {f['title']}")
+                  print(f"         {why[0]}")
               else:
                   why = "its test passed, so the code was right" if r.returncode == 0 else "its test didn't run"
                   rejected.append(f"- {f['title']} ({why})")
