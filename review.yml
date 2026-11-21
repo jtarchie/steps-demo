@@ -1,0 +1,209 @@
+# An AI code reviewer that has to prove every bug, as a steps pipeline.
+# https://github.com/jtarchie/steps
+#
+# Every open PR on this repo gets a review, but a finding only reaches the PR
+# if a test proves it. The reviewer agent writes each finding with a unittest
+# that should FAIL on the PR's code if the bug is real. It cannot run anything
+# itself (no shell tool), so it cannot grade its own homework: `prove` runs
+# every test, and `gate` fails when one passed (the claim was wrong) and sends
+# the reviewer back once with what was thrown out. Whatever the second pass
+# says, only proven findings are posted.
+#
+#   steps validate review.yml
+#   steps run review.yml        # review every open PR once
+#   steps web                   # then `steps pipeline set -p review -c review.yml`
+#                               # to poll and review each new PR or push
+#
+# Needs: GH_TOKEN (repo scope, to read PRs and post the review), docker (each
+# step runs in python:3.12, with no network), and a model: the claude CLI
+# logged in, as below, or any model steps supports. To point it at your own
+# repo, change `repo:` in both resources and the prompt's package name.
+
+resources:
+  - name: pr
+    type: github-prs
+    source:
+      repo: jtarchie/steps-demo
+      base: main
+      draft: false
+      checkout: git # history to the merge base, so prove can run the base too
+
+  - name: review
+    type: github-pr-review
+    source:
+      repo: jtarchie/steps-demo
+
+agents:
+  # "@claude/sonnet" runs the claude CLI on your own login. Any model steps
+  # supports works here, e.g. an OpenRouter model with api_key_env.
+  - name: reviewer
+    source:
+      model: "@claude/sonnet"
+    budget: {usd: 1.00}
+    # Reads and writes findings. No run_shell: the proof is run by a step the
+    # model cannot steer.
+    tools: [read_file, list_dir, search_files, write_file]
+
+jobs:
+  - name: review
+    max_in_flight: 1
+    timeout: 30m
+    plan:
+      - get: pr
+        trigger: true
+        version: every # one build per PR and per push
+
+      # proof starts empty so the reviewer, declared before prove, has an input
+      # to name on its first visit (inputs resolve in declaration order).
+      - task: stage
+        image: python:3.12
+        network: none
+        inputs: [pr]
+        outputs: [proof]
+        run: |
+          set -eu
+          echo 0 > proof/visits
+          echo "staged #$(cat pr/pr.number): $(grep -c '^diff --git' pr/pr.diff) file(s) changed"
+        assert:
+          stdout: staged
+
+      - agent: reviewer
+        image: python:3.12
+        network: none
+        inputs: [pr, proof]
+        outputs: [findings]
+        context_paths: [pr/pr.diff]
+        timeout: 10m
+        messages:
+          - |
+            Review this pull request. pr/pr.diff is the change; pr/ is the
+            repository at the PR's head (pr/pr.json is the PR itself). Read the
+            changed files whole, and the code they call.
+
+            Report only bugs: code that does the wrong thing for some input. No
+            style, naming or "consider" notes.
+
+            You cannot run code. A separate step will run your proof for each
+            finding, and a finding whose proof does not fail is thrown out
+            before anyone sees it. So for each finding write a unittest file
+            findings/test_<id>.py that imports from the shop package (from shop
+            import cart) and asserts the CORRECT behavior, so it fails on this
+            PR's code if, and only if, your finding is real. One test method per
+            file.
+
+            Then write findings/findings.json: a JSON array, one object per
+            finding: {"id": "1", "title": "...", "file": "shop/cart.py",
+            "line": 30, "body": "...", "proof": "findings/test_1.py"}. title is
+            one plain sentence; body is two or three sentences for the PR author,
+            a teammate: what goes wrong, for which input, and the fix. Write []
+            if you found nothing you can prove.
+
+            If proof/rejected.md exists, you have been here before: it lists
+            findings whose proofs passed, meaning the code was right and the
+            finding was wrong. Do not report those again. Keep the ones that
+            were proven.
+
+            Stop after writing the files.
+        assert:
+          files: [findings/findings.json]
+
+      # Runs each proof against a throwaway copy of the PR's tree. Proven means
+      # the test FAILED (an assertion, not an import error). Always exits 0 so
+      # its output is captured; deciding is gate's job. proof/ is read-modify-
+      # write for the visit count only.
+      - task: prove
+        image: python:3.12
+        network: none
+        inputs: [pr, findings, proof]
+        outputs: [proof]
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import json, os, re, shutil, subprocess, tempfile
+          visits = int(open("proof/visits").read().strip() or 0) + 1
+          findings = json.load(open("findings/findings.json"))
+          proven, rejected = [], []
+          for f in findings:
+              tmp = tempfile.mkdtemp()
+              shutil.copytree("pr", tmp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", "pr.*"))
+              os.makedirs(f"{tmp}/proofs", exist_ok=True)
+              shutil.copy(f["proof"], f"{tmp}/proofs/test_proof.py")
+              open(f"{tmp}/proofs/__init__.py", "w").close()
+              r = subprocess.run(["python3", "-m", "unittest", "proofs.test_proof"],
+                                 cwd=tmp, capture_output=True, text=True)
+              out = r.stdout + r.stderr
+              failures = re.search(r"failures=(\d+)", out)
+              errors = re.search(r"errors=(\d+)", out)
+              if failures and not errors:
+                  proven.append(f)
+                  print(f"PROVEN   {f['title']}")
+              else:
+                  why = "its test passed, so the code was right" if r.returncode == 0 else "its test didn't run"
+                  rejected.append(f"- {f['title']} ({why})")
+                  print(f"REJECTED {f['title']}: {why}")
+          json.dump(proven, open("proof/proven.json", "w"), indent=2)
+          open("proof/rejected.md", "w").write("\n".join(rejected) + ("\n" if rejected else ""))
+          open("proof/visits", "w").write(str(visits))
+          print(f"prove: {len(proven)} proven, {len(rejected)} rejected (pass {visits})")
+          PY
+        assert:
+          stdout: "prove:"
+
+      # A rejected finding on the first pass sends
+      # the reviewer back; on the second, what's proven goes out and the rest
+      # stays thrown out. The route consumes the failure, so the job stays green.
+      - task: gate
+        image: python:3.12
+        network: none
+        inputs: [proof]
+        to: {failure: reviewer}
+        max_visits: 2
+        run: |
+          set -eu
+          if [ -s proof/rejected.md ] && [ "$(cat proof/visits)" -lt 2 ]; then
+            echo "gate: the reviewer claimed bugs its own tests couldn't show:"
+            cat proof/rejected.md
+            echo "sending it back"
+            exit 1
+          fi
+          echo "gate: $(python3 -c 'import json;print(len(json.load(open("proof/proven.json"))))') finding(s) proven, posting"
+
+      - task: render
+        image: python:3.12
+        network: none
+        inputs: [pr, proof]
+        outputs: [post, answer]
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import json
+          proven = json.load(open("proof/proven.json"))
+          num = open("pr/pr.number").read().strip()
+          if proven:
+              lead = "This comes" if len(proven) == 1 else "Each of these comes"
+              # The review posts under the token's user, so it says what wrote it.
+              body = ["Posted by a [steps](https://github.com/jtarchie/steps) pipeline. "
+                      f"{lead} with a test that fails on this branch.", ""]
+              for f in proven:
+                  body += [f"**{f['title']}** (`{f['file']}:{f['line']}`)", "", f["body"], ""]
+          else:
+              body = ["Read it over. Nothing I could prove with a failing test."]
+          open("post/body.md", "w").write("\n".join(body))
+          n = len(proven)
+          if n == 1:
+              line = f"Reviewed #{num}: 1 bug, proven by a failing test."
+          elif n:
+              line = f"Reviewed #{num}: {n} bugs, each proven by a failing test."
+          else:
+              line = f"Reviewed #{num}: nothing I could prove."
+          open("answer/reply.md", "w").write(line + "\n")
+          print(f"rendered: {n} finding(s)")
+          PY
+        assert:
+          stdout: rendered
+
+      - put: review
+        inputs: [pr, post]
+        params:
+          body_file: post/body.md
+          event: comment
