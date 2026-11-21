@@ -1,0 +1,66 @@
+# Plain CI for this repo, as a steps pipeline: no agents, no API keys.
+# https://github.com/jtarchie/steps
+#
+#   steps run ci.yml                  # the same pipeline, on your laptop
+#   steps run ci.yml --resume <run>   # after a fix: carry on from the step that failed
+#
+# Every task declares what it reads and writes, so steps can skip one whose
+# inputs haven't changed. `src` copies just the code, so a docs-only commit
+# hands lint, test and package the same bytes and all three are skipped.
+#
+# Needs: docker (each task runs in python:3.12 with no network) and git.
+
+resources:
+  - name: repo
+    type: git
+    source:
+      uri: https://github.com/jtarchie/steps-demo.git
+      branch: main
+
+jobs:
+  - name: ci
+    plan:
+      - get: repo
+        trigger: true
+
+      # The code alone. README and friends never reach the steps below.
+      - task: src
+        image: python:3.12
+        network: none
+        inputs: [repo]
+        outputs: [src]
+        run: cp -r repo/shop repo/tests src/
+
+      - task: lint
+        image: python:3.12
+        network: none
+        inputs: [src]
+        outputs: [lint]
+        run: |
+          python - <<'PY' | tee lint/report.txt
+          import ast, pathlib
+          files = sorted(pathlib.Path("src").rglob("*.py"))
+          for f in files:
+              ast.parse(f.read_text(), str(f))
+          print(f"lint: {len(files)} files parse")
+          PY
+
+      - task: test
+        image: python:3.12
+        network: none
+        inputs: [src]
+        outputs: [report]
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s src/tests -t src -v > report/tests.txt 2>&1
+          status=$?
+          cat report/tests.txt
+          exit $status
+
+      - task: package
+        image: python:3.12
+        network: none
+        inputs: [src, report]
+        outputs: [dist]
+        run: |
+          cd src && python -m zipfile -c ../dist/shop.zip shop
+          echo "package: dist/shop.zip $(wc -c < ../dist/shop.zip) bytes"

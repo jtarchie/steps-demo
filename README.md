@@ -20,3 +20,13 @@ steps run review.yml
 ```
 
 It needs `GH_TOKEN`, Docker, and a model (the file's comments say which).
+
+## CI
+
+[`ci.yml`](ci.yml) is plain CI with no agents: lint, test and package, each
+in a container with no network. It runs the same on your laptop as on a
+server, and a step whose inputs haven't changed is skipped.
+
+```bash
+steps run ci.yml
+```
