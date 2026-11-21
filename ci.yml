@@ -23,7 +23,7 @@ jobs:
       - get: repo
         trigger: true
 
-      # The code alone. README and friends never reach the steps below.
+      # Just the code: docs never reach the steps below.
       - task: src
         image: python:3.12
         network: none
@@ -49,7 +49,7 @@ jobs:
         image: python:3.12
         network: none
         inputs: [src]
-        outputs: [report] # the pass marker: a step needs an output to be skippable
+        outputs: [report] # a pass marker, so the step can be skipped
         run: |
           set -e
           python -m unittest discover -s src/tests -t src -v
