@@ -49,12 +49,11 @@ jobs:
         image: python:3.12
         network: none
         inputs: [src]
-        outputs: [report]
+        outputs: [report] # the pass marker: a step needs an output to be skippable
         run: |
-          PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s src/tests -t src -v > report/tests.txt 2>&1
-          status=$?
-          cat report/tests.txt
-          exit $status
+          set -e
+          python -m unittest discover -s src/tests -t src -v
+          touch report/passed
 
       - task: package
         image: python:3.12
